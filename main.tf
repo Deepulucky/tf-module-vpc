@@ -1,41 +1,119 @@
-resource "aws_vpc" "main" {
-  cidr_block           = var.cidr_block
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = merge(var.tags, { Name = "${var.env}-vpc" })
-}
+# resource "aws_vpc" "main" {
+#   cidr_block           = var.cidr_block
+#   enable_dns_support   = true
+#   enable_dns_hostnames = true
+#   tags                 = merge(var.tags, { Name = "${var.env}-vpc" })
+# }
 
+
+# module "subnets" {
+#     source = "./subnets"
+
+#     for_each = var.subnets
+#     vpc_id = aws_vpc.main.vpc_id
+#     cidr_block = each.value["cidr_block"]
+#     name = each.value["name"]
+#     azs = each.value["azs"]
+
+#     tags = var.tags
+#     env = var.env
+# }
+
+
+# resource "aws_internet_gateway" "igw" {
+#     vpc_id = aws_vpc.main.vpc_id
+
+#     tags = merge(var.tags, {Name = "${var.env}-igw"})
+# }
+
+# resource "aws_eip" "ngw" {
+#     count = length(var.subnets["public"].cidr_block)
+#     vpc = true
+#     tags = merge(var.tags, {Name = "${var.env}-ngw"})
+# }
+
+# resource "aws_nat_gateway" "ngw" {
+#     count = length(var.subnets["public"].cidr_block)
+#     allocation_id = aws_eip.ngw[count.index].id
+#     subnet_id = module.subnets["public"].subnet_ids[count.index]
+
+#     tags = merge(var.tags, {name= "${var.env}-ngw"})
+# }
+
+resource "aws_vpc" "main" {
+  cidr_block         = var.cidr_block
+  enable_dns_support = true
+  tags = merge({
+    Name = "${var.env}-vpc"
+    },
+  var.tags)
+}
 
 module "subnets" {
-    source = "./subnets"
+  source = "./subnets"
 
-    for_each = var.subnets
-    vpc_id = aws_vpc.main.vpc_id
-    cidr_block = each.value["cidr_block"]
-    name = each.value["name"]
-    azs = each.value["azs"]
+  for_each    = var.subnets
+  cidr_block  = each.value["cidr_block"]
+  subnet_name = each.key
 
-    tags = var.tags
-    env = var.env
+  vpc_id = aws_vpc.main.id
+
+  env  = var.env
+  tags = var.tags
+  az   = var.az
 }
 
+resource "aws_vpc_peering_connection" "peer" {
+  peer_vpc_id = aws_vpc.main.id
+  vpc_id      = var.default_vpc_id
+  auto_accept = true
+}
 
 resource "aws_internet_gateway" "igw" {
-    vpc_id = aws_vpc.main.vpc_id
+  vpc_id = aws_vpc.main.id
 
-    tags = merge(var.tags, {Name = "${var.env}-igw"})
+  tags = merge({
+    Name = "${var.env}-igw"
+    },
+  var.tags)
+}
+
+resource "aws_route" "route-igw" {
+  route_table_id         = module.subnets["public"].route_table_ids
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.igw.id
 }
 
 resource "aws_eip" "ngw" {
-    count = length(var.subnets["public"].cidr_block)
-    vpc = true
-    tags = merge(var.tags, {Name = "${var.env}-ngw"})
+  domain = "vpc"
 }
 
 resource "aws_nat_gateway" "ngw" {
-    count = length(var.subnets["public"].cidr_block)
-    allocation_id = aws_eip.ngw[count.index].id
-    subnet_id = module.subnets["public"].subnet_ids[count.index]
+  allocation_id = aws_eip.ngw.id
+  subnet_id     = lookup(lookup(module.subnets, "public", null), "subnet_ids", null)[0]
 
-    tags = merge(var.tags, {name= "${var.env}-ngw"})
+  tags = merge({
+    Name = "${var.env}-ngw"
+    },
+  var.tags)
+}
+
+resource "aws_route" "route-ngw" {
+  count                  = length(local.private_route_table_ids)
+  route_table_id         = element(local.private_route_table_ids, count.index)
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.ngw.id
+}
+
+resource "aws_route" "peer-route" {
+  count                     = length(local.all_route_table_ids)
+  route_table_id            = element(local.all_route_table_ids, count.index)
+  destination_cidr_block    = "172.31.0.0/16"
+  vpc_peering_connection_id = aws_vpc_peering_connection.peer.id
+}
+
+resource "aws_route" "default-vpc-peer-route" {
+  route_table_id            = var.default_vpc_rt
+  destination_cidr_block    = var.cidr_block
+  vpc_peering_connection_id = aws_vpc_peering_connection.peer.id
 }
